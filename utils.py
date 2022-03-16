@@ -1,19 +1,17 @@
-import os
-import requests
+
 import numpy as np
 import pandas as pd
 import scipy
-from halo import Halo
+# from halo import Halo
 from pathlib import Path
 import json
-from scipy.stats import skew, kurtosis
 
 ERA_COL = "era"
 TARGET_COL = "target_nomi_20"
 DATA_TYPE_COL = "data_type"
 EXAMPLE_PREDS_COL = "example_preds"
 
-spinner = Halo(text='', spinner='dots')
+# spinner = Halo(text='', spinner='dots')
 
 MODEL_FOLDER = "models"
 MODEL_CONFIGS_FOLDER = "model_configs"

@@ -1,4 +1,5 @@
 
+from typing import List
 import numpy as np
 import pandas as pd
 import scipy
@@ -271,3 +272,12 @@ def validation_metrics(validation_data, pred_cols, example_col, fast_mode=False)
 
     # .transpose so that stats are columns and the model_name is the row
     return validation_stats.transpose()
+
+
+def get_all_columns(parquet_file: str) -> List[str]:
+    from pyarrow.parquet import ParquetFile
+    import pyarrow
+    pf = ParquetFile(parquet_file) 
+    first_ten_rows = next(pf.iter_batches(batch_size = 100)) 
+    training_data = pyarrow.Table.from_batches([first_ten_rows]).to_pandas()
+    return training_data.columns

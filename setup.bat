@@ -1,4 +1,4 @@
 python -m venv venv
+venv\Scripts\python.exe -m pip install --upgrade pip wheel setuptools
+venv\Scripts\pip.exe install -r requirements.txt
 venv\Scripts\activate
-python -m pip install --upgrade pip
-pip install -r requirements.txt

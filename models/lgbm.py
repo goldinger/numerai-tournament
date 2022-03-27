@@ -1,8 +1,13 @@
-from re import T
-from typing import List, Tuple
+if __name__ == '__main__':
+    import sys
+    sys.path.append('D:/projects/numerai-tournament') 
+
+from typing import List, Literal, Optional, Tuple, Union
 from dotenv import load_dotenv
+from tqdm import tqdm
+from models.utils import create_folder
 load_dotenv()
-from utils import get_all_columns, get_biggest_change_features, neutralize
+from models.utils import get_all_columns, get_biggest_change_features, load_model, neutralize, save_model
 import pandas as pd
 import numerapi
 import os
@@ -16,6 +21,7 @@ import gc
 import json
 import logging
 
+
 logger = logging.getLogger("LGBM")
 
 
@@ -24,9 +30,12 @@ def get_training_data(filename: str) -> Tuple[pd.DataFrame, List[str], List[str]
 
     logger.info('Reading minimal training data')
     # read the feature metadata and get the "small" feature set
-    # with open(FEATURES_FILE, "r") as f:
-    #     feature_metadata = json.load(f)
-    # features = feature_metadata["feature_sets"]["small"]
+    
+    DATA_FOLDER = "data"
+    FEATURES_FILE = os.path.join(DATA_FOLDER, "features.json")
+    with open(FEATURES_FILE, "r") as f:
+        feature_metadata = json.load(f)
+    features = feature_metadata["feature_sets"]["small"]
     # read in just those features along with era and target columns
     read_columns = features + targets + other_cols
     # note: sometimes when trying to read the downloaded data you get an error about invalid magic parquet bytes...
@@ -49,14 +58,26 @@ def get_columns(filename: str) -> Tuple[List[str], List[str], List[str], List[st
     return all_columns, features, targets, other_columns
 
 
-def create_folder(folder):
-    if os.path.exists(folder):
-        return
-    logger.info(f"Creating {folder} folder")
-    os.makedirs(folder)
+def get_model(training_data, target_col, filename:Optional[str]=None):
+    if filename is not None and os.path.exists(filename):
+        return load_model(filename)
+    params = {"n_estimators": 2000,
+                "learning_rate": 0.01,
+                "max_depth": 5,
+                "num_leaves": 2 ** 5,
+                "colsample_bytree": 0.1}
+    model = LGBMRegressor(**params)
+
+    # train on all of train and save the model so we don't have to train next time
+    model.fit(training_data.filter(like='feature_', axis='columns'), training_data[target_col])
+    logger.info(f"saving new model: {filename}")
+    save_model(model, filename)
+    return model
 
 
-def run(neutralize_riskiest: int=50):
+def run(features_set: Literal['full', 'small', 'medium', 'legacy']="full", force_regen: bool=True, neutralize_riskiest: Optional[Union[List[int], int]]=None):
+    if neutralize_riskiest is None:
+        neutralize_riskiest = 168
     public_id = os.environ.get("NUMERAI_PUBLIC_KEY")
     secret_key = os.environ.get("NUMERAI_SECRET_KEY")
     
@@ -68,9 +89,11 @@ def run(neutralize_riskiest: int=50):
     logger.info(f"Current Round : {current_round}")
     
     DATA_FOLDER = "data"
-    OUTPUT_FOLDER = os.path.join("OUTPUT", str(current_round))
+    OUTPUT_FOLDER = os.path.join("output", "lgbm", features_set, str(current_round))
+    MODEL_FOLDER = os.path.join('cache', features_set)
     create_folder(DATA_FOLDER)
     create_folder(OUTPUT_FOLDER)
+    create_folder(MODEL_FOLDER)
     
     TRAINING_DATA_FILE = os.path.join(DATA_FOLDER, "training_data.parquet")
     TOURNAMENT_DATA_FILE = os.path.join(DATA_FOLDER, f"tournament_data_{current_round}.parquet")
@@ -79,10 +102,12 @@ def run(neutralize_riskiest: int=50):
     FEATURES_FILE = os.path.join(DATA_FOLDER, "features.json")
 
     MODEL_NAME = "lbgm"
-    TARGET_MODEL_FILE = os.path.join(OUTPUT_FOLDER, f"{MODEL_NAME}.model")
-    VALIDATION_PREDICTIONS_FILE = os.path.join(OUTPUT_FOLDER, "validation_predictions.csv")
-    TOURNAMENT_PREDICTIONS_FILE = os.path.join(OUTPUT_FOLDER, "tournament_predictions.csv")
+    TARGET_MODEL_FILE = os.path.join(MODEL_FOLDER, f"{MODEL_NAME}.model")
+    FEATURES_CORR_FILE = os.path.join(MODEL_FOLDER, "features_corr.csv")
+    VALIDATION_PREDICTIONS_FILE = os.path.join(OUTPUT_FOLDER, f"validation_predictions.csv")
+    TOURNAMENT_PREDICTIONS_FILE = os.path.join(OUTPUT_FOLDER, f"tournament_predictions.csv")
 
+    PREDICTION_COL = f"prediction"
     TARGET_COL = 'target'
     ERA_COL = 'era'
     DATA_TYPE_COL = 'data_type'
@@ -100,26 +125,7 @@ def run(neutralize_riskiest: int=50):
     
     training_data, all_columns, features = get_training_data(TRAINING_DATA_FILE)
     
-    # getting the per era correlation of each feature vs the target
-    all_feature_corrs = training_data.groupby(ERA_COL).apply(
-        lambda era: era[features].corrwith(era[TARGET_COL])
-    )
-    
-    riskiest_features = get_biggest_change_features(all_feature_corrs, neutralize_riskiest)
-    
-    # gc.collect()
-    
-    params = {"n_estimators": 2000,
-                "learning_rate": 0.01,
-                "max_depth": 5,
-                "num_leaves": 2 ** 5,
-                "colsample_bytree": 0.1}
-    model = LGBMRegressor(**params)
-
-    # train on all of train and save the model so we don't have to train next time
-    model.fit(training_data.filter(like='feature_', axis='columns'), training_data[TARGET_COL])
-    # print(f"saving new model: {TARGET_MODEL_FILE}")
-    # save_model(model, TARGET_MODEL_FILE)
+    model = get_model(training_data, TARGET_COL, TARGET_MODEL_FILE)
     gc.collect()
     
     validation_data = pd.read_parquet(VALIDATION_DATA_FILE, columns=all_columns)
@@ -144,45 +150,67 @@ def run(neutralize_riskiest: int=50):
     model_expected_features = model.booster_.feature_name()
     if set(model_expected_features) != set(features):
         logger.warn(f"New features are available! Might want to retrain model {MODEL_NAME}.")
-    validation_data.loc[:, f"preds_{MODEL_NAME}"] = model.predict(
+    
+    validation_data.loc[:, PREDICTION_COL] = model.predict(
         validation_data.loc[:, model_expected_features])
-    tournament_data.loc[:, f"preds_{MODEL_NAME}"] = model.predict(
+    tournament_data.loc[:, PREDICTION_COL] = model.predict(
         tournament_data.loc[:, model_expected_features])
 
     gc.collect()
     
-    # neutralize our predictions to the riskiest features
-    validation_data[f"preds_{MODEL_NAME}_neutral_riskiest_50"] = neutralize(
-        df=validation_data,
-        columns=[f"preds_{MODEL_NAME}"],
-        neutralizers=riskiest_features,
-        proportion=1.0,
-        normalize=True,
-        era_col=ERA_COL
-    )
-
-    tournament_data[f"preds_{MODEL_NAME}_neutral_riskiest_50"] = neutralize(
-        df=tournament_data,
-        columns=[f"preds_{MODEL_NAME}"],
-        neutralizers=riskiest_features,
-        proportion=1.0,
-        normalize=True,
-        era_col=ERA_COL
-    )
-
-
-    model_to_submit = f"preds_{MODEL_NAME}_neutral_riskiest_50"
-
-    # rename best model to "prediction" and rank from 0 to 1 to meet upload requirements
-    validation_data["prediction"] = validation_data[model_to_submit].rank(pct=True)
-    tournament_data["prediction"] = tournament_data[model_to_submit].rank(pct=True)
+    if force_regen or not os.path.exists(FEATURES_CORR_FILE):
+        # getting the per era correlation of each feature vs the target
+        all_feature_corrs = training_data.groupby(ERA_COL).apply(
+            lambda era: era[features].corrwith(era[TARGET_COL])
+        )
+        all_feature_corrs.to_csv(FEATURES_CORR_FILE)
+    else:
+        all_feature_corrs = pd.read_csv(FEATURES_CORR_FILE)
     
-    # save predictions to csv
-    validation_data["prediction"].to_csv(VALIDATION_PREDICTIONS_FILE)
-    tournament_data["prediction"].to_csv(TOURNAMENT_PREDICTIONS_FILE)
+    if type(neutralize_riskiest) is int:
+        neutralize_riskiest = [neutralize_riskiest]
     
-    validation_preds = pd.read_parquet(EXAMPLE_VALIDATION_PREDICTIONS_FILE)
-    validation_data[EXAMPLE_PREDS_COL] = validation_preds["prediction"]
+    if type(neutralize_riskiest) is list:  
+        for n in tqdm(neutralize_riskiest):
+            validation_file = os.path.join(OUTPUT_FOLDER, f"validation_predictions_{n}.csv")
+            tournament_file = os.path.join(OUTPUT_FOLDER, f"tournament_predictions_{n}.csv")
+            riskiest_features = get_biggest_change_features(all_feature_corrs, n)
+            if force_regen or not os.path.exists(validation_file):
+                # neutralize our predictions to the riskiest features
+                validation_result = neutralize(
+                    df=validation_data,
+                    columns=[PREDICTION_COL],
+                    neutralizers=riskiest_features,
+                    proportion=1.0,
+                    normalize=True,
+                    era_col=ERA_COL
+                )
+                validation_result = validation_result.rank(pct=True)
+                validation_result.to_csv(validation_file)
+
+            if force_regen or not os.path.exists(tournament_file):
+                tournament_result = neutralize(
+                    df=tournament_data,
+                    columns=[PREDICTION_COL],
+                    neutralizers=riskiest_features,
+                    proportion=1.0,
+                    normalize=True,
+                    era_col=ERA_COL
+                )
+                
+                tournament_result = tournament_result.rank(pct=True)
+                tournament_result.to_csv(tournament_file)
+
+            # rename best model to "prediction" and rank from 0 to 1 to meet upload requirements
+            # validation_data["prediction"] = validation_data[model_to_submit].rank(pct=True)
+            # tournament_data["prediction"] = tournament_data[model_to_submit].rank(pct=True)
+            
+            # save predictions to csv
+            # validation_data["prediction"].to_csv(VALIDATION_PREDICTIONS_FILE)
+            # tournament_data["prediction"].to_csv(TOURNAMENT_PREDICTIONS_FILE)
+    
+    # validation_preds = pd.read_parquet(EXAMPLE_VALIDATION_PREDICTIONS_FILE)
+    # validation_data[EXAMPLE_PREDS_COL] = validation_preds["prediction"]
     
     # get some stats about each of our models to compare...
     # fast_mode=True so that we skip some of the stats that are slower to calculate
@@ -192,5 +220,7 @@ def run(neutralize_riskiest: int=50):
 if __name__ == '__main__':
     from datetime import datetime
     start = datetime.now()
-    run()
+    values = [165 + x for x in range(5)]
+    print(values)
+    run(neutralize_riskiest=50)
     print((datetime.now() - start).total_seconds())

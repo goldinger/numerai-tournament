@@ -25,17 +25,16 @@ import logging
 logger = logging.getLogger("LGBM")
 
 
-def get_training_data(filename: str) -> Tuple[pd.DataFrame, List[str], List[str]]:
+def get_training_data(filename: str, features_set: str='full', features_file=None) -> Tuple[pd.DataFrame, List[str], List[str]]:
     all_columns, features, targets, other_cols = get_columns(filename)
 
     logger.info('Reading minimal training data')
     # read the feature metadata and get the "small" feature set
     
-    DATA_FOLDER = "data"
-    FEATURES_FILE = os.path.join(DATA_FOLDER, "features.json")
-    with open(FEATURES_FILE, "r") as f:
-        feature_metadata = json.load(f)
-    features = feature_metadata["feature_sets"]["small"]
+    if features_set != 'full' and features_file is not None:
+        with open(features_file, "r") as f:
+            feature_metadata = json.load(f)
+        features = feature_metadata["feature_sets"][features_set]
     # read in just those features along with era and target columns
     read_columns = features + targets + other_cols
     # note: sometimes when trying to read the downloaded data you get an error about invalid magic parquet bytes...
@@ -89,17 +88,21 @@ def run(features_set: Literal['full', 'small', 'medium', 'legacy']="full", force
     logger.info(f"Current Round : {current_round}")
     
     DATA_FOLDER = "data"
-    OUTPUT_FOLDER = os.path.join("output", "lgbm", features_set, str(current_round))
-    MODEL_FOLDER = os.path.join('cache', features_set)
     create_folder(DATA_FOLDER)
+    ROUND_FOLDER = os.path.join(DATA_FOLDER, str(current_round))
+    create_folder(ROUND_FOLDER)
+    INPUT_FOLDER = os.path.join(ROUND_FOLDER, "input")
+    create_folder(INPUT_FOLDER)
+    OUTPUT_FOLDER = os.path.join(ROUND_FOLDER, "output", "lgbm", features_set)
     create_folder(OUTPUT_FOLDER)
+    MODEL_FOLDER = os.path.join(ROUND_FOLDER, 'cache', features_set)
     create_folder(MODEL_FOLDER)
     
-    TRAINING_DATA_FILE = os.path.join(DATA_FOLDER, "training_data.parquet")
-    TOURNAMENT_DATA_FILE = os.path.join(DATA_FOLDER, f"tournament_data_{current_round}.parquet")
-    VALIDATION_DATA_FILE = os.path.join(DATA_FOLDER, "validation_data.parquet")
-    EXAMPLE_VALIDATION_PREDICTIONS_FILE = os.path.join(DATA_FOLDER, "example_validation_predictions.parquet")
-    FEATURES_FILE = os.path.join(DATA_FOLDER, "features.json")
+    TRAINING_DATA_FILE = os.path.join(INPUT_FOLDER, "training_data.parquet")
+    TOURNAMENT_DATA_FILE = os.path.join(INPUT_FOLDER, f"tournament_data.parquet")
+    VALIDATION_DATA_FILE = os.path.join(INPUT_FOLDER, "validation_data.parquet")
+    EXAMPLE_VALIDATION_PREDICTIONS_FILE = os.path.join(INPUT_FOLDER, "example_validation_predictions.parquet")
+    FEATURES_FILE = os.path.join(INPUT_FOLDER, "features.json")
 
     MODEL_NAME = "lbgm"
     TARGET_MODEL_FILE = os.path.join(MODEL_FOLDER, f"{MODEL_NAME}.model")
@@ -123,7 +126,7 @@ def run(features_set: Literal['full', 'small', 'medium', 'legacy']="full", force
     napi.download_dataset("features.json", FEATURES_FILE)
     logger.info("All files ready")
     
-    training_data, all_columns, features = get_training_data(TRAINING_DATA_FILE)
+    training_data, all_columns, features = get_training_data(TRAINING_DATA_FILE, features_set, FEATURES_FILE)
     
     model = get_model(training_data, TARGET_COL, TARGET_MODEL_FILE)
     gc.collect()
@@ -220,7 +223,7 @@ def run(features_set: Literal['full', 'small', 'medium', 'legacy']="full", force
 if __name__ == '__main__':
     from datetime import datetime
     start = datetime.now()
-    values = [165 + x for x in range(5)]
+    values = [160 + x for x in range(10)]
     print(values)
-    run(neutralize_riskiest=50)
+    run(neutralize_riskiest=50, features_set='small')
     print((datetime.now() - start).total_seconds())

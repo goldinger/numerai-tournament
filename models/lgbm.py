@@ -1,16 +1,17 @@
+from dotenv import load_dotenv
+import os
+load_dotenv()
+
 if __name__ == '__main__':
     import sys
-    sys.path.append('D:/projects/numerai-tournament') 
+    sys.path.append(os.environ.get('BASE_DIR')) 
 
 from typing import List, Literal, Optional, Tuple, Union
-from dotenv import load_dotenv
 from tqdm import tqdm
 from models.utils import create_folder
-load_dotenv()
 from models.utils import get_all_columns, get_biggest_change_features, load_model, neutralize, save_model
 import pandas as pd
 import numerapi
-import os
 import warnings
 warnings.filterwarnings("ignore")
 import numpy as np
@@ -225,5 +226,6 @@ if __name__ == '__main__':
     start = datetime.now()
     values = [160 + x for x in range(10)]
     print(values)
+    # run(neutralize_riskiest=168)
     run(neutralize_riskiest=50, features_set='small')
     print((datetime.now() - start).total_seconds())

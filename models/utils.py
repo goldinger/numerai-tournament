@@ -1,9 +1,13 @@
 
 import os
-from typing import List
+from typing import List, Tuple
 import numpy as np
 import pandas as pd
 import scipy
+import logging
+
+
+logger = logging.getLogger(__name__)
 
 
 def get_all_columns(parquet_file: str) -> List[str]:
@@ -229,3 +233,17 @@ def neutralize_series(series, by, proportion=1.0):
     neutralized = pd.Series(corrected_scores.ravel(), index=series.index)
     return neutralized
 
+
+def get_columns(filename: str) -> Tuple[List[str], List[str], List[str], List[str]]:
+    all_columns = get_all_columns(filename)
+    features = [c for c in all_columns if c.startswith("feature_")]
+    targets = [c for c in all_columns if c.startswith("target_") or c == 'target']
+    other_columns = [c for c in all_columns if c != 'target' and not c.startswith("feature_") and not c.startswith("target_")]
+    # logger.info(f"Columns loaded.\nFeatures: {len(features)}\nTargets: {len(targets)}\nOther: {len(other_columns)}")
+    print(pd.DataFrame([{
+        "features": len(features),
+        "targets": len(targets),
+        "other": len(other_columns),
+        "stats": "nb_cols"
+    }]).set_index("stats"))
+    return all_columns, features, targets, other_columns

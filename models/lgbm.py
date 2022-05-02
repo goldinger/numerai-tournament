@@ -27,7 +27,7 @@ logger = logging.getLogger("LGBM")
 
 
 class LGBM:
-    def __init__(self, features_set: Literal['full', 'small']="full", neutralize_riskiest: Optional[Union[List[int], int]]=None):
+    def __init__(self, features_set: Literal['full', 'small']="full", neutralize_riskiest: Optional[int]=None):
         if neutralize_riskiest is None:
             self.neutralize_riskiest = 168
         else:
@@ -41,6 +41,7 @@ class LGBM:
         logger.info("Successfully logged into Numerai API")
         self.current_round = self.numerapi.get_current_round()
         logger.info(f"Current Round : {self.current_round}")
+        self.numerai_model_name = os.environ.get("NUMERAI_LGBM_MODEL_NAME")
         
         self.DATA_FOLDER = os.environ.get("DATA_DIR", "data")
         create_folder(self.DATA_FOLDER)
@@ -70,12 +71,7 @@ class LGBM:
         self.ERA_COL = 'era'
         self.DATA_TYPE_COL = 'data_type'
         self.EXAMPLE_PREDS_COL = "example_preds"
-        
-        # self.tournament_data = None
-        # self.validation_data = None
-        # self.training_data = None
-        # self.model = None
-        
+                
         self.download_dataset()
     
     def download_dataset(self):
@@ -154,21 +150,7 @@ class LGBM:
             logger.warn(f"New features are available! Might want to retrain model {self.MODEL_NAME}.")
     
     
-    def run(self):
-        self.load_training_data()
-        self.train_model()
-        self.load_tournament_data()
-        self.check_model_features()
-        
-        self.validation_data = pd.read_parquet(self.VALIDATION_DATA_FILE, columns=self.all_columns)
-        
-        self.validation_data[self.PREDICTION_COL] = self.model.predict(
-            self.validation_data[self.model_expected_features])
-        self.tournament_data[self.PREDICTION_COL] = self.model.predict(
-            self.tournament_data[self.model_expected_features])
-
-        gc.collect()
-        
+    def calculate_riskiest_features(self):
         if not os.path.exists(self.FEATURES_CORR_FILE):
             # getting the per era correlation of each feature vs the target
             all_feature_corrs = self.training_data.groupby(self.ERA_COL).apply(
@@ -178,47 +160,58 @@ class LGBM:
         else:
             all_feature_corrs = pd.read_csv(self.FEATURES_CORR_FILE)
         
-        if type(self.neutralize_riskiest) is int:
-            self.neutralize_riskiest = [self.neutralize_riskiest]
+        self.riskiest_features = get_biggest_change_features(all_feature_corrs, self.neutralize_riskiest)
+    
+    
+    def run(self, upload_predictions: bool=False, generate_validation_file: bool=False):
+        self.load_training_data()
+        self.train_model()
+        self.load_tournament_data()
+        self.check_model_features()
+        self.calculate_riskiest_features()
         
-        if type(self.neutralize_riskiest) is list:  
-            for n in tqdm(self.neutralize_riskiest):
-                validation_file = os.path.join(self.OUTPUT_FOLDER, f"validation_predictions_{n}.csv")
-                tournament_file = os.path.join(self.OUTPUT_FOLDER, f"tournament_predictions_{n}.csv")
-                riskiest_features = get_biggest_change_features(all_feature_corrs, n)
-                if not os.path.exists(validation_file):
-                    # neutralize our predictions to the riskiest features
-                    validation_result = neutralize(
-                        df=self.validation_data,
-                        columns=[self.PREDICTION_COL],
-                        neutralizers=riskiest_features,
-                        proportion=1.0,
-                        normalize=True,
-                        era_col=self.ERA_COL
-                    )
-                    validation_result = validation_result.rank(pct=True)
-                    validation_result.to_csv(validation_file)
+        if generate_validation_file:
+            self.validation_data = pd.read_parquet(self.VALIDATION_DATA_FILE, columns=self.all_columns)
+            self.validation_data[self.PREDICTION_COL] = self.model.predict(self.validation_data[self.model_expected_features])
+            # neutralize our predictions to the riskiest features
+            validation_result = neutralize(
+                df=self.validation_data,
+                columns=[self.PREDICTION_COL],
+                neutralizers=self.riskiest_features,
+                proportion=1.0,
+                normalize=True,
+                era_col=self.ERA_COL
+            )
+            validation_result = validation_result.rank(pct=True)
+            validation_result.to_csv(self.VALIDATION_PREDICTIONS_FILE)
 
-                if not os.path.exists(tournament_file):
-                    tournament_result = neutralize(
-                        df=self.tournament_data,
-                        columns=[self.PREDICTION_COL],
-                        neutralizers=riskiest_features,
-                        proportion=1.0,
-                        normalize=True,
-                        era_col=self.ERA_COL
-                    )
-                    
-                    tournament_result = tournament_result.rank(pct=True)
-                    tournament_result.to_csv(tournament_file)
+        
+        self.tournament_data[self.PREDICTION_COL] = self.model.predict(self.tournament_data[self.model_expected_features])
+        tournament_result = neutralize(
+            df=self.tournament_data,
+            columns=[self.PREDICTION_COL],
+            neutralizers=self.riskiest_features,
+            proportion=1.0,
+            normalize=True,
+            era_col=self.ERA_COL
+        )
+        
+        tournament_result = tournament_result.rank(pct=True)
+        tournament_result.to_csv(self.TOURNAMENT_PREDICTIONS_FILE)
+        
+        if upload_predictions:
+            model_uuid = self.numerapi.get_models().get(self.numerai_model_name)
+            logger.info(f"Uploading predictions to Numerai API for model : {self.numerai_model_name} (uuid: {model_uuid})")
+            if self.numerapi.submission_status(model_uuid) is None:
+                self.numerapi.upload_predictions(self.TOURNAMENT_PREDICTIONS_FILE, model_id=model_uuid)
 
-                # rename best model to "prediction" and rank from 0 to 1 to meet upload requirements
-                # validation_data["prediction"] = validation_data[model_to_submit].rank(pct=True)
-                # tournament_data["prediction"] = tournament_data[model_to_submit].rank(pct=True)
-                
-                # save predictions to csv
-                # validation_data["prediction"].to_csv(VALIDATION_PREDICTIONS_FILE)
-                # tournament_data["prediction"].to_csv(TOURNAMENT_PREDICTIONS_FILE)
+        # rename best model to "prediction" and rank from 0 to 1 to meet upload requirements
+        # validation_data["prediction"] = validation_data[model_to_submit].rank(pct=True)
+        # tournament_data["prediction"] = tournament_data[model_to_submit].rank(pct=True)
+        
+        # save predictions to csv
+        # validation_data["prediction"].to_csv(VALIDATION_PREDICTIONS_FILE)
+        # tournament_data["prediction"].to_csv(TOURNAMENT_PREDICTIONS_FILE)
         
         # validation_preds = pd.read_parquet(EXAMPLE_VALIDATION_PREDICTIONS_FILE)
         # validation_data[EXAMPLE_PREDS_COL] = validation_preds["prediction"]
@@ -231,7 +224,7 @@ class LGBM:
 if __name__ == '__main__':
     from datetime import datetime
     start = datetime.now()
-    LGBM().run()
+    LGBM().run(upload_predictions=True)
     # values = [160 + x for x in range(10)]
     # print(values)
     # run(neutralize_riskiest=values)

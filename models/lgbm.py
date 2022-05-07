@@ -158,7 +158,7 @@ class LGBM:
             )
             all_feature_corrs.to_csv(self.FEATURES_CORR_FILE)
         else:
-            all_feature_corrs = pd.read_csv(self.FEATURES_CORR_FILE)
+            all_feature_corrs = pd.read_csv(self.FEATURES_CORR_FILE).set_index('era')
         
         self.riskiest_features = get_biggest_change_features(all_feature_corrs, self.neutralize_riskiest)
     

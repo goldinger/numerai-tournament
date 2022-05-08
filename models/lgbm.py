@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from dotenv import load_dotenv
 load_dotenv()
 import os
@@ -6,73 +7,65 @@ if __name__ == '__main__':
     project_root = os.environ.get('PROJECT_ROOT_DIR', '')
     sys.path.append(project_root) 
 
-from typing import List, Literal, Optional, Tuple, Union
-from tqdm import tqdm
+from typing import List, Literal, Optional
 from models.utils import create_folder, get_columns
-from models.utils import get_all_columns, get_biggest_change_features, load_model, neutralize, save_model
+from models.utils import get_biggest_change_features, load_model, neutralize, save_model
 import pandas as pd
 import numerapi
 import warnings
 warnings.filterwarnings("ignore")
-import numpy as np
-import scipy
 import json
 from lightgbm import LGBMRegressor
-import gc
 import json
 import logging
 
 
 logger = logging.getLogger("LGBM")
 
-
+@dataclass
 class LGBM:
-    def __init__(self, features_set: Literal['full', 'small']="full", neutralize_riskiest: Optional[int]=None):
-        if neutralize_riskiest is None:
-            self.neutralize_riskiest = 168
-        else:
-            self.neutralize_riskiest = neutralize_riskiest
-        self.features_set = features_set
-        
+    numerai_public_key: Optional[str] = None
+    numerai_secret_key: Optional[str] = None
+    numerai_model_name: Optional[str] = None
+    
+    DATA_FOLDER: str = "data"
+    features_set: Literal["full", "small"] = "full"
+    PREDICTION_COL: str = "prediction"
+    TARGET_COL: str = 'target'
+    ERA_COL: str = 'era'
+    DATA_TYPE_COL: str = 'data_type'
+    EXAMPLE_PREDS_COL: str = "example_preds"
+    MODEL_NAME: str = "lbgm"
+    
+    
+    def __post_init__(self):        
         logger.info("Connecting to Numerai server")
-        public_id = os.environ.get("NUMERAI_PUBLIC_KEY")
-        secret_key = os.environ.get("NUMERAI_SECRET_KEY")
-        self.numerapi = numerapi.NumerAPI(public_id, secret_key)
+        self.numerapi = numerapi.NumerAPI(self.numerai_public_key, self.numerai_secret_key)
         logger.info("Successfully logged into Numerai API")
         self.current_round = self.numerapi.get_current_round()
         logger.info(f"Current Round : {self.current_round}")
-        self.numerai_model_name = os.environ.get("NUMERAI_LGBM_MODEL_NAME")
         
-        self.DATA_FOLDER = os.environ.get("DATA_DIR", "data")
-        create_folder(self.DATA_FOLDER)
         self.ROUND_FOLDER = os.path.join(self.DATA_FOLDER, str(self.current_round))
-        create_folder(self.ROUND_FOLDER)
         self.INPUT_FOLDER = os.path.join(self.ROUND_FOLDER, "input")
+        self.OUTPUT_FOLDER = os.path.join(self.ROUND_FOLDER, "output", "lgbm", self.features_set)
+        self.MODEL_FOLDER = os.path.join(self.ROUND_FOLDER, 'cache', self.features_set)
+        
+        create_folder(self.DATA_FOLDER)
+        create_folder(self.ROUND_FOLDER)
         create_folder(self.INPUT_FOLDER)
-        self.OUTPUT_FOLDER = os.path.join(self.ROUND_FOLDER, "output", "lgbm", features_set)
         create_folder(self.OUTPUT_FOLDER)
-        self.MODEL_FOLDER = os.path.join(self.ROUND_FOLDER, 'cache', features_set)
         create_folder(self.MODEL_FOLDER)
-
+        
         self.TRAINING_DATA_FILE = os.path.join(self.INPUT_FOLDER, "training_data.parquet")
         self.TOURNAMENT_DATA_FILE = os.path.join(self.INPUT_FOLDER, f"tournament_data.parquet")
         self.VALIDATION_DATA_FILE = os.path.join(self.INPUT_FOLDER, "validation_data.parquet")
         self.EXAMPLE_VALIDATION_PREDICTIONS_FILE = os.path.join(self.INPUT_FOLDER, "example_validation_predictions.parquet")
         self.FEATURES_FILE = os.path.join(self.INPUT_FOLDER, "features.json")
-
-        self.MODEL_NAME = "lbgm"
         self.TARGET_MODEL_FILE = os.path.join(self.MODEL_FOLDER, f"{self.MODEL_NAME}.model")
         self.FEATURES_CORR_FILE = os.path.join(self.MODEL_FOLDER, "features_corr.csv")
         self.VALIDATION_PREDICTIONS_FILE = os.path.join(self.OUTPUT_FOLDER, f"validation_predictions.csv")
         self.TOURNAMENT_PREDICTIONS_FILE = os.path.join(self.OUTPUT_FOLDER, f"tournament_predictions.csv")
         
-        self.PREDICTION_COL = f"prediction"
-        self.TARGET_COL = 'target'
-        self.ERA_COL = 'era'
-        self.DATA_TYPE_COL = 'data_type'
-        self.EXAMPLE_PREDS_COL = "example_preds"
-                
-        self.download_dataset()
     
     def download_dataset(self):
         # Tournament data changes every week so we specify the round in their name. Training
@@ -150,7 +143,7 @@ class LGBM:
             logger.warn(f"New features are available! Might want to retrain model {self.MODEL_NAME}.")
     
     
-    def calculate_riskiest_features(self):
+    def calculate_riskiest_features(self, neutralize_riskiest: int = 168):
         if not os.path.exists(self.FEATURES_CORR_FILE):
             # getting the per era correlation of each feature vs the target
             all_feature_corrs = self.training_data.groupby(self.ERA_COL).apply(
@@ -160,15 +153,25 @@ class LGBM:
         else:
             all_feature_corrs = pd.read_csv(self.FEATURES_CORR_FILE).set_index('era')
         
-        self.riskiest_features = get_biggest_change_features(all_feature_corrs, self.neutralize_riskiest)
+        self.riskiest_features = get_biggest_change_features(all_feature_corrs, neutralize_riskiest)
     
     
-    def run(self, upload_predictions: bool=False, generate_validation_file: bool=False):
+    def upload_predictions(self) -> None:
+        model_uuid = self.numerapi.get_models().get(self.numerai_model_name)
+        logger.info(f"Uploading predictions to Numerai API for model : {self.numerai_model_name} (uuid: {model_uuid})")
+        if self.numerapi.submission_status(model_uuid) is None:
+            self.numerapi.upload_predictions(self.TOURNAMENT_PREDICTIONS_FILE, model_id=model_uuid)
+            logger.info("Predictions uploaded")
+        else:
+            logger.info("Predictions already uploaded, skipping...")
+    
+    def run(self, neutralize_riskiest: int = 168, upload_predictions: bool=False, generate_validation_file: bool=False) -> None:
+        self.download_dataset()
         self.load_training_data()
         self.train_model()
         self.load_tournament_data()
         self.check_model_features()
-        self.calculate_riskiest_features()
+        self.calculate_riskiest_features(neutralize_riskiest)
         
         if generate_validation_file:
             self.validation_data = pd.read_parquet(self.VALIDATION_DATA_FILE, columns=self.all_columns)
@@ -200,10 +203,7 @@ class LGBM:
         tournament_result.to_csv(self.TOURNAMENT_PREDICTIONS_FILE)
         
         if upload_predictions:
-            model_uuid = self.numerapi.get_models().get(self.numerai_model_name)
-            logger.info(f"Uploading predictions to Numerai API for model : {self.numerai_model_name} (uuid: {model_uuid})")
-            if self.numerapi.submission_status(model_uuid) is None:
-                self.numerapi.upload_predictions(self.TOURNAMENT_PREDICTIONS_FILE, model_id=model_uuid)
+            self.upload_predictions()
 
         # rename best model to "prediction" and rank from 0 to 1 to meet upload requirements
         # validation_data["prediction"] = validation_data[model_to_submit].rank(pct=True)

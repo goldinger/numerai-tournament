@@ -1,9 +1,9 @@
 import inspect
-from models import lgbm
+from models.lgbm import LGBM
 
 
 options = [
-    ('LightGBM Regressor', lgbm.run),
+    ('LightGBM Regressor', LGBM().run),
     ('Exit', quit)
 ]
 

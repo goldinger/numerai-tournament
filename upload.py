@@ -1,8 +1,11 @@
 import os
 from models.lgbm import LGBM
 import logging
+from models.utils import create_folder
 
-logging.basicConfig(filename='upload.log', encoding='utf-8', level=logging.DEBUG)
+
+create_folder('logs')
+logging.basicConfig(filename='logs/upload.log', encoding='utf-8', level=logging.DEBUG, format='%(asctime)s|%(levelname)s|%(name)s: %(message)s')
 
 def run_lgbm() -> None:
     model = LGBM(

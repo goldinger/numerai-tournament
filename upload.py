@@ -1,6 +1,8 @@
 import os
 from models.lgbm import LGBM
+import logging
 
+logging.basicConfig(filename='upload.log', encoding='utf-8', level=logging.DEBUG)
 
 def run_lgbm() -> None:
     model = LGBM(
